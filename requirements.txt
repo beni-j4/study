@@ -1,0 +1,31 @@
+# Web Framework & Database
+Flask
+Flask-SQLAlchemy
+Flask-Migrate
+Flask-Login
+Flask-CORS
+Werkzeug
+gunicorn
+
+# AI & Language Models
+google-generativeai
+google-genai
+openai
+mistralai
+
+# Data Science & Machine Learning
+numpy
+pandas
+scikit-learn
+umap-learn
+matplotlib
+seaborn
+
+# Document & Image Processing
+PyMuPDF
+PyPDF2
+Pillow
+
+# Security & Utilities
+PyJWT
+python-dotenv
