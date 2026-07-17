@@ -1,0 +1,5 @@
+.env
+user_data_cache/
+IMAGE_STORAGE_DIR/
+__pycache__/
+*.pyc
