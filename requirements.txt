@@ -11,20 +11,15 @@ psycopg2-binary
 # AI & Language Models
 google-generativeai
 google-genai
-openai
-mistralai
 
 # Data Science & Machine Learning
 numpy
 pandas
 scikit-learn
 umap-learn
-matplotlib
-seaborn
 
 # Document & Image Processing
 PyMuPDF
-PyPDF2
 Pillow
 
 # Security & Utilities
