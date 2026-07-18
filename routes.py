@@ -1,24 +1,23 @@
-from flask import json, json, render_template, request, jsonify, send_file
+import datetime
+import os
+from functools import wraps
+from flask import render_template, request, jsonify, send_file, json
 from flask_login import login_user, logout_user, current_user
-from models import Course, Users
+import jwt
+import pandas
 from werkzeug.security import generate_password_hash, check_password_hash
 
-import AI_API, os, pandas
-import jwt
-import datetime
-from functools import wraps
-
-from flask import request, jsonify
+import AI_API
 from AI_API import generate_adaptive_exam, update_relevance_map
+from models import Course, Users
+
 EXAM_SESSIONS = {} 
 
-SECRET_KEY = "your_super_secret_key" # Keep this in environment variables!
+SECRET_KEY = "your_super_secret_key" 
 IMAGE_STORAGE_DIR = "IMAGE_STORAGE_DIR"
 UPLOAD_DIR = 'user_data_cache'
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(IMAGE_STORAGE_DIR, exist_ok=True)
-
-
 
 def token_required(f):
     @wraps(f)
@@ -33,7 +32,6 @@ def token_required(f):
             return jsonify({"message": "Token is invalid"}), 401
         return f(current_user_id, *args, **kwargs)
     return decorated
-
 
 def register_routes(app, db):
     @app.route('/people', methods=['GET', 'POST'])
@@ -164,7 +162,7 @@ def register_routes(app, db):
             som = pandas.read_csv(csv_path)
             return jsonify(som['topic'].tolist())
 
-        if som['topic'] is list:
+        if isinstance(som['topic'], list):
             return jsonify(som['topic'])
         else:
             return jsonify(som['topic'].tolist())
@@ -186,7 +184,12 @@ def register_routes(app, db):
         chunks = merged['content'].tolist()
         v = AI_API.study(topic_value, chunks)
         print(v)
-        return jsonify(v)
+        
+        # Safely parse the generated JSON payload to avoid double serialization issues on client endpoints
+        try:
+            return jsonify(json.loads(v))
+        except Exception:
+            return jsonify({"raw_output": v})
 
     @app.route('/ask_ai', methods=['POST'])
     @token_required
@@ -202,9 +205,6 @@ def register_routes(app, db):
         answer = AI_API.ask(question=question, chunks=a, history=history)
         return jsonify({"answer": answer}), 200
 
-    # Add this to your routes.py
-
-
     @app.route('/generate_exam', methods=['POST'])
     @token_required
     def generate_exam(user_id):
@@ -215,8 +215,6 @@ def register_routes(app, db):
             return jsonify({"status": "error", "message": "Course name is required"}), 400
 
         try:
-            # Call the production AI function
-            # Ensure UPLOAD_DIR matches the path where your files are actually saved
             questions_data = generate_adaptive_exam(course_name, upload_dir=UPLOAD_DIR)
             EXAM_SESSIONS[user_id] = questions_data 
             
@@ -226,18 +224,12 @@ def register_routes(app, db):
             })
             
         except FileNotFoundError as e:
-            # Triggered if the course material hasn't been uploaded yet
             return jsonify({"status": "error", "message": str(e)}), 404
-            
         except ValueError as e:
-            # Triggered if Gemini returns a bad JSON format
             return jsonify({"status": "error", "message": str(e)}), 500
-            
         except Exception as e:
-            # Catch-all for API connection issues, etc.
             return jsonify({"status": "error", "message": f"An unexpected error occurred: {str(e)}"}), 500
         
-
     @app.route('/upload_past_questions', methods=['POST'])
     @token_required
     def upload_past_questions(user_id):
@@ -252,26 +244,20 @@ def register_routes(app, db):
 
         if file and course_name:
             try:
-                # 1. Extract Text and Images directly from the file stream using AI_API
                 data_list = AI_API.process_pdf_and_save_images(file, course_name)
-                
-                # 2. Compile all content into a single massive string for analysis
                 past_questions_text = ""
                 
                 for item in data_list:
                     if item['type'] == 'text':
                         past_questions_text += item['content'] + "\n"
                     elif item['type'] == 'image':
-                        # Use Gemini OCR to read text out of diagrams, scanned pages, or math equations
                         ocr_text = AI_API.extract_text_from_image(item['content'])
                         if ocr_text:
                             past_questions_text += f"\n[Extracted from image/diagram]: {ocr_text}\n"
                 
-                # Security check: Make sure we actually found something
                 if not past_questions_text.strip():
                     return jsonify({"status": "error", "message": "No readable text or images found in the document."}), 400
                 
-                # 3. Pass the combined text to generate the relevance map
                 relevance_map = AI_API.update_relevance_map(
                     course_name=course_name, 
                     past_questions_text=past_questions_text, 
@@ -287,35 +273,26 @@ def register_routes(app, db):
             except FileNotFoundError as e:
                 return jsonify({"status": "error", "message": str(e)}), 404
             except Exception as e:
-                # Catch-all for API issues, invalid PDFs, etc.
                 return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
 
     @app.route('/submit_exam', methods=['POST'])
     @token_required
     def submit_exam(user_id):
         data = request.get_json(force=True)
-        user_answers = data.get('answers') # Expected: { "0": "answer...", "1": "answer..." }
+        user_answers = data.get('answers') 
         
-        # 1. Retrieve the original questions
         original_exam = EXAM_SESSIONS.get(user_id)
         if not original_exam:
             return jsonify({"message": "No active exam session found"}), 400
         
-        # 2. Grade all answers in ONE single API call
         graded_batch = AI_API.grade_exam_batch(original_exam, user_answers)
-        
-        # Create a lookup map by index in case the AI returns items out of order
         results_map = {item['index']: item for item in graded_batch}
         
         graded_items = []
         total_score = 0
         
-        # 3. Build the response structure for your Flutter frontend
-        # 3. Build the response structure for your Flutter frontend
         for i, question_data in enumerate(original_exam):
             ans = user_answers.get(str(i), "")
-            
-            # Fetch the grade from our AI batch result map
             result = results_map.get(i, {"score": 0, "feedback": "Grading missed for this item."})
             
             score = result.get('score', 0)
@@ -324,15 +301,12 @@ def register_routes(app, db):
             graded_items.append({
                 "question": question_data['question'],
                 "userAnswer": ans,
-                # Add the rubric here so Flutter can display what the answer SHOULD have been:
                 "correctAnswer": question_data.get('rubric', 'No specific rubric provided.'),
                 "score": score,
                 "feedback": feedback
             })
-            
             total_score += score
         
-        # 4. Clear session and return results
         EXAM_SESSIONS.pop(user_id, None)
         
         return jsonify({
@@ -340,7 +314,6 @@ def register_routes(app, db):
             "total": len(original_exam) * 10,
             "items": graded_items
         })
-
 
     @app.route('/get_relevance/<course_name>', methods=['GET'])
     @token_required
