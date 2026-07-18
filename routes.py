@@ -358,3 +358,23 @@ def register_routes(app, db):
     @app.route('/clarify_item', methods=['POST'])
     @token_required
     def clarify_item(user_id):
+        data = request.get_json(force=True)
+        
+        question = data.get('question', '')
+        user_answer = data.get('userAnswer', '')
+        correct_answer = data.get('correctAnswer', '')
+        feedback = data.get('feedback', '')
+        user_query = data.get('query', '')
+        
+        if not user_query:
+            return jsonify({"status": "error", "message": "Query cannot be empty"}), 400
+            
+        explanation = AI_API.clarify_exam_item(
+            question=question,
+            user_answer=user_answer,
+            correct_answer=correct_answer,
+            feedback=feedback,
+            user_query=user_query
+        )
+        
+        return jsonify({"status": "success", "answer": explanation}), 200
