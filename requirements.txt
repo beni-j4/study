@@ -6,6 +6,7 @@ Flask-Login
 Flask-CORS
 Werkzeug
 gunicorn
+psycopg2-binary
 
 # AI & Language Models
 google-generativeai
