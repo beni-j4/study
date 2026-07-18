@@ -1,29 +1,22 @@
-import fitz
-import json
-import os
-
-import pandas as p
-import textwrap
-from dotenv import load_dotenv
-from google.genai import types
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-
-
-import umap
-from sklearn.cluster import KMeans
-
-from PIL import Image
 import fitz  # PyMuPDF
-
-import google.generativeai as genai
 import json
 import os
+import textwrap
 import uuid
-
-
+import numpy as np
+import pandas as p
 from dotenv import load_dotenv
+from PIL import Image
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+import umap
 
+# Legacy SDK
+import google.generativeai as genai
+
+# New SDK (Cleanly aliased to prevent namespace conflicts)
+from google import genai as google_genai
+from google.genai import types
 
 # 1. Load variables from the .env file into the system environment
 load_dotenv()
@@ -31,19 +24,11 @@ load_dotenv()
 # 2. Retrieve the API key securely
 api_key = os.getenv("GEMINI_API_KEY")
 
-# 3. Configure the Gemini SDK using the variable
 if not api_key:
     raise ValueError("No GEMINI_API_KEY found. Please set it in your .env file!")
 
+# Configure the legacy Gemini SDK
 genai.configure(api_key=api_key)
-
-# Initialize your model as usual
-model = genai.GenerativeModel('gemini-2.5-flash')
-
-# Ensure you have set your GEMINI_API_KEY environment variable
-
-
-# We use Gemini 2.5 Flash as it is highly optimized for fast, structured JSON tasks
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 UPLOAD_DIR = 'user_data_cache'
@@ -79,54 +64,45 @@ def reduce(merged_data):
 
     # 3. Generate content using the global 'model' defined at the top of your file
     response = model.generate_content(contents)
-
     return response.text
 
 def create_conv(chunk):
-	client = genai.Client(api_key="AIzaSyDgwStXI8p392EjNmPG2QLhtXgvf7S9_Wk")
+    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-	response = client.models.generate_content(
-		model="gemini-3-flash-preview",
-		config=types.GenerateContentConfig(
-			system_instruction=chunk),
-		contents="Hello there"
-	)
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        config=types.GenerateContentConfig(system_instruction=chunk),
+        contents="Hello there"
+    )
 
-	chat = client.chats.create(model="gemini-3-flash-preview")
+    chat = client.chats.create(model="gemini-3-flash-preview")
 
-	response = chat.send_message("I have 2 dogs in my house.")
-	print(response.text)
+    response = chat.send_message("I have 2 dogs in my house.")
+    print(response.text)
 
-	response = chat.send_message("How many paws are in my house?")
-	print(response.text)
+    response = chat.send_message("How many paws are in my house?")
+    print(response.text)
 
-	for message in chat.get_history():
-		print(f'role - {message.role}',end=": ")
-		print(message.parts[0].text)
-	print(response.text)
+    for message in chat.get_history():
+        print(f'role - {message.role}', end=": ")
+        print(message.parts[0].text)
+    print(response.text)
 
 def embed_fn(item):
-    # Use the standard embedding model for the google.generativeai package
     model_name = 'gemini-embedding-2'
     
     if item['type'] == 'image':
-        # Important: text-embedding-004 is a text-only embedding model. 
-        # Passing raw PIL images directly will throw an API error in this SDK.
-        # We use your existing OCR function to extract text from the saved image path first!
         content_to_embed = extract_text_from_image(item['content'])
         if not content_to_embed:
             content_to_embed = "Image with no readable text"
     else:
         content_to_embed = item['content']
         
-    # Call embed_content directly from the genai module
     response = genai.embed_content(
         model=model_name,
         content=content_to_embed,
         task_type="retrieval_document"
     )
-    
-    # In google.generativeai, the return value is a dictionary containing the 'embedding' key
     return response['embedding']
 
 def process_pdf(file_stream):
@@ -148,15 +124,9 @@ def process_pdf(file_stream):
     return data_list
 
 def split_text(text):
-	"""
-	Splits extracted PDF text into manageable chunks for AI processing.
-	"""
-	
-
-	chunks = textwrap.wrap(text, width=200)
-	
-		
-	return chunks
+    """Splits extracted PDF text into manageable chunks for AI processing."""
+    chunks = textwrap.wrap(text, width=200)
+    return chunks
 
 def pdf_Reader(pdf_path):
     doc = fitz.open(stream=pdf_path.read(), filetype="pdf")
@@ -176,29 +146,17 @@ def pdf_Reader(pdf_path):
         for img in image_list:
             xref = img[0]
             pix = fitz.Pixmap(doc, xref)
-            # Convert to bytes
             img_bytes = pix.tobytes()
             data_list.append({'type': 'image', 'content': img_bytes})
             
     return data_list
 
 def get_vectors(data_list):
-    # data_list will now contain dictionaries with 'type' and 'content'
-    
-    # 1. Create the DataFrame directly from the list of dictionaries
     df = p.DataFrame(data_list) 
-    
-    # 2. Apply the updated embed_fn that knows how to handle both text and image paths
     df['Embeddings'] = df.apply(lambda row: embed_fn({'type': row['type'], 'content': row['content']}), axis=1)
-    
     return df
-	
+    
 def find_best_passage(query, dataframe):
-    """
-    Compute the distances between the query and each document in the dataframe
-    using the dot product.
-    """
-    # MUST match the model name used in embed_fn above!
     model_name = "gemini-embedding-2"
     
     query_response = genai.embed_content(
@@ -216,12 +174,11 @@ def find_best_passage(query, dataframe):
     score = dot_products[idx]
     print(score)
     if score > 0.75:
-        return str(dataframe.iloc[idx]['chunk'])
+        return str(dataframe.iloc[idx]['content'])
     else:
         return 'No information on this topic'
  
 def gettopic(df, course):
-    # 1. Clustering logic (with small dataset handling)
     is_small_dataset = len(df) < 8
     
     if not is_small_dataset:
@@ -247,15 +204,12 @@ def gettopic(df, course):
         dc = np.argwhere(df['module_id'].values == each).flatten()
         merged = []
         
-        # Similarity merge logic
         for i in dc:
             for j in dc:
                 if i > j:
-                    # FIX: Reshape the 1D embedding array to 2D (1, N)
                     emb_i = np.array(df.iloc[i]['Embeddings']).reshape(1, -1)
                     emb_j = np.array(df.iloc[j]['Embeddings']).reshape(1, -1)
                     
-                    # Now cosine_similarity will work correctly
                     dot_product = cosine_similarity(emb_i, emb_j)[0][0]
                     
                     if 0.85 < dot_product < 1:
@@ -264,64 +218,53 @@ def gettopic(df, course):
                         if df.iloc[j]['content'] not in merged:
                             merged.append(df.iloc[j]['content']) 
         
-        # Fallback: if no pairs, include everything
         if not merged and len(dc) > 0:
             merged = df.iloc[dc]['content'].tolist()
             
         merged = list(set(merged))
         if merged:
-            # CALLING THE MULTIMODAL REDUCE FUNCTION
             some.append(str(reduce(merged)))
             vicky.append(each)
 
     return module_chunk
 
 def study(topic, chunks):
-
-	prompt = f"""System/Context: You are an expert educator specializing in simplifying complex topics for students. 
-	Task: Create a comprehensive study guide based on the provided topic and text chunks or images. Input 
-	Topic: {topic} Input Text Chunks: {chunks} Please structure the output as follows: 
-	Summary: Provide a 30-sentence high-level overview of the topic. Key Concepts: Create a bulleted list of the most important terms/concepts 
-	found in the text and explain them briefly in 200 words, in plain language. 
-	The Why it Matters Section: Explain why this topic is relevant to the broader subject or real-world application. 
-	Study Quiz: Provide 15 multiple-choice questions (with one correct answer and two distractors each) to test understanding. 
-	Advanced Prompt: Create a single, open-ended thought question that would require a student to analyze the text deeply. 
-	Constraints: Keep the tone encouraging and academic but accessible. Use clear, concise language.
-	Return your response strictly as a valid JSON dictionary with this exact structure:
-	{{
-	"content": "return the initial chunk of text you were given, with complete information"
-	"summary": "...",
-	"key_concepts": [{{"term": "...", "definition": "...", "overview and relevance": "..." }}],
-	"why_it_matters": "...",
-	"study_quiz": [{{"question": "...", "answers": [{{"text": "...", "correct": true}}, ...]}}],
-	}}
-	"""
-
-	# Generate content using the new client syntax
-	response = model.generate_content(prompt)
-	# response.text contains the JSON string
-	return response.text
+    prompt = f"""System/Context: You are an expert educator specializing in simplifying complex topics for students. 
+    Task: Create a comprehensive study guide based on the provided topic and text chunks or images. Input 
+    Topic: {topic} Input Text Chunks: {chunks} Please structure the output as follows: 
+    Summary: Provide a 30-sentence high-level overview of the topic. Key Concepts: Create a bulleted list of the most important terms/concepts 
+    found in the text and explain them briefly in 200 words, in plain language. 
+    The Why it Matters Section: Explain why this topic is relevant to the broader subject or real-world application. 
+    Study Quiz: Provide 15 multiple-choice questions (with one correct answer and two distractors each) to test understanding. 
+    Advanced Prompt: Create a single, open-ended thought question that would require a student to analyze the text deeply. 
+    Constraints: Keep the tone encouraging and academic but accessible. Use clear, concise language.
+    Return your response strictly as a valid JSON dictionary with this exact structure:
+    {{
+    "content": "return the initial chunk of text you were given, with complete information"
+    "summary": "...",
+    "key_concepts": [{{"term": "...", "definition": "...", "overview and relevance": "..." }}],
+    "why_it_matters": "...",
+    "study_quiz": [{{"question": "...", "answers": [{{"text": "...", "correct": true}}, ...]}}],
+    }}
+    """
+    response = model.generate_content(prompt)
+    return response.text
 
 def ask(question, chunks, history):
-    client = genai.Client(api_key="AIzaSyDgwStXI8p392EjNmPG2QLhtXgvf7S9_Wk")
+    client = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     prompt = f"Answer this: {question} based on: {chunks}, keep your answer short and concise, Around 100 to 200 words"
     
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-		contents=prompt
+        contents=prompt
     )
     return response.text
 
 def extract_text_from_image(image_path):
     """Uses Gemini to extract text from a saved image file."""
     try:
-        # Open the image file
         img = Image.open(image_path)
-        
         prompt = "Extract all readable text from this image exactly as written. Do not summarize. If there is no text, return exactly 'NO_TEXT_FOUND'."
-        
-        # Use the global 'model' variable already defined at the top of your file
-        # Make sure 'model' is initialized as: model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content([img, prompt])
         
         if not response.text or "NO_TEXT_FOUND" in response.text:
@@ -336,36 +279,27 @@ def process_pdf_and_save_images(file_stream, course_name):
     doc = fitz.open(stream=file_stream.read(), filetype="pdf")
     data_list = []
     
-    # Text extraction
     for page in doc:
         text = page.get_text()
         if text.strip():
-            # Use your existing split_text function here if you want
             chunks = split_text(text)
             for chunk in chunks:
                 data_list.append({'type': 'text', 'content': chunk})
             
-    # Image extraction and file saving
     for page_idx, page in enumerate(doc):
         for img_idx, img in enumerate(page.get_images(full=True)):
             xref = img[0]
             pix = fitz.Pixmap(doc, xref)
             
-            # Save image to disk
             img_filename = f"{course_name}_p{page_idx}_i{img_idx}.png"
             img_path = os.path.join(IMAGE_STORAGE_DIR, img_filename)
             pix.save(img_path)
             
-            # Store path in data list
             data_list.append({'type': 'image', 'content': img_path})
             
     return data_list
 
 def generate_adaptive_exam(course_name, upload_dir="uploads"):
-    """
-    Generates a dynamic exam based on course content and historical relevance.
-    """
-    # 1. Load course data (Assuming it's stored as a CSV or text file from the earlier upload)
     topics_file = os.path.join(upload_dir, f"{course_name}topics.csv")
     if not os.path.exists(topics_file):
         raise FileNotFoundError(f"Course material for '{course_name}' not found. Please upload materials first.")
@@ -373,7 +307,6 @@ def generate_adaptive_exam(course_name, upload_dir="uploads"):
     with open(topics_file, 'r', encoding='utf-8') as f:
         course_content = f.read()
 
-    # 2. Load Relevance Map (if it exists from past questions)
     relevance_file = os.path.join(upload_dir, f"{course_name}_relevance.json")
     relevance_data = "No past question data available. Distribute questions evenly across topics."
     
@@ -381,8 +314,6 @@ def generate_adaptive_exam(course_name, upload_dir="uploads"):
         with open(relevance_file, 'r') as f:
             relevance_data = f.read()
 
-    # 3. Construct the System Prompt
-    # Update your prompt string inside generate_adaptive_exam:
     prompt = f"""
     You are an expert university professor. Create exactly 20 exam questions for the course: '{course_name}'.
     
@@ -390,7 +321,7 @@ def generate_adaptive_exam(course_name, upload_dir="uploads"):
     Historical relevance: {relevance_data}
     
     CRITICAL CONSTRAINTS:
-    1. You must return EXACTLY 20 essay questions.
+    1. You must return EXACTLY 20 exam questions.
     2. You must include 15 'objective' (multiple choice/short answer) and 5 'essay' (long form) questions.
     3. Return ONLY a valid JSON array. Do not include any intro/outro text.
     
@@ -403,16 +334,12 @@ def generate_adaptive_exam(course_name, upload_dir="uploads"):
     }}
     """
     
-    # 4. Call the Gemini API
     response = model.generate_content(prompt)
     
-    # 5. Parse and Validate the JSON Output
     try:
-        # Strip potential markdown formatting the AI might add
         raw_text = response.text.strip().removeprefix('```json').removesuffix('```').strip()
         questions = json.loads(raw_text)
         
-        # Ensure UUIDs are valid just in case the AI hallucinated weird IDs
         for q in questions:
             if 'id' not in q or len(q['id']) < 5:
                 q['id'] = str(uuid.uuid4())
@@ -423,9 +350,6 @@ def generate_adaptive_exam(course_name, upload_dir="uploads"):
         raise ValueError("The AI generated an invalid exam format. Please try again.")
 
 def update_relevance_map(course_name, past_questions_text, upload_dir="uploads"):
-    """
-    Analyzes past questions against course topics to create a relevance map.
-    """
     topics_file = os.path.join(upload_dir, f"{course_name}topics.csv")
     
     if not os.path.exists(topics_file):
@@ -463,7 +387,6 @@ def update_relevance_map(course_name, past_questions_text, upload_dir="uploads")
         raw_text = response.text.strip().removeprefix('```json').removesuffix('```').strip()
         relevance_data = json.loads(raw_text)
         
-        # Save this map so the Exam Generator can use it later
         relevance_file = os.path.join(upload_dir, f"{course_name}_relevance.json")
         with open(relevance_file, 'w', encoding='utf-8') as f:
             json.dump(relevance_data, f, indent=4)
@@ -473,9 +396,6 @@ def update_relevance_map(course_name, past_questions_text, upload_dir="uploads")
     except json.JSONDecodeError:
         raise ValueError("Failed to parse AI relevance map.")
 
-    # 1. Temporary session storage (Use Redis in production)
-
-# Add this to AI_API.py
 def grade_essay(question, student_response, rubric):
     prompt = f"""
     You are an expert examiner. 
@@ -488,21 +408,13 @@ def grade_essay(question, student_response, rubric):
     """
     
     response = model.generate_content(prompt)
-    
-    # Strip markdown and parse JSON
     raw_text = response.text.strip().removeprefix('```json').removesuffix('```').strip()
     try:
         return json.loads(raw_text)
     except:
         return {"score": 0, "feedback": "Error processing answer."}
 
-# Add/replace at the bottom of AI_API.py
-
 def grade_exam_batch(original_exam, user_answers):
-    """
-    Grades an entire exam in a single Gemini API call to save tokens and dramatically reduce latency.
-    """
-    # 1. Bundle all items into a single structured list
     batch_payload = []
     for i, question_data in enumerate(original_exam):
         batch_payload.append({
@@ -512,7 +424,6 @@ def grade_exam_batch(original_exam, user_answers):
             "student_response": user_answers.get(str(i), "")
         })
         
-    # 2. Instruct the model to return a matching JSON array of grades
     prompt = f"""
     You are an expert university examiner. You have been given a batch of exam questions, the grading rubric for each, and the student's submitted responses.
     
@@ -536,16 +447,32 @@ def grade_exam_batch(original_exam, user_answers):
     """
     
     try:
-        # Call Gemini once for the whole exam
         response = model.generate_content(prompt)
-        
-        # Strip markdown formatting if the AI includes it
         raw_text = response.text.strip().removeprefix('```json').removesuffix('```').strip()
         return json.loads(raw_text)
-        
     except Exception as e:
         print(f"Batch grading failed: {e}")
-        # Fallback: if parsing fails, return safe default zeros so the app doesn't crash
         return [{"index": i, "score": 0, "feedback": "Error processing grading for this item."} for i in range(len(original_exam))]
     
 def clarify_exam_item(question, user_answer, correct_answer, feedback, user_query):
+    prompt = f"""
+    You are an encouraging and insightful university tutor helping a student review their exam results.
+    
+    Context of the exam item:
+    - Question Asked: "{question}"
+    - Student's Answer: "{user_answer}"
+    - Expected Answer / Rubric: "{correct_answer}"
+    - Examiner's Initial Feedback: "{feedback}"
+    
+    Student's Follow-up Question/Doubt: "{user_query}"
+    
+    Task: Answer the student's follow-up question directly. Explain clearly and gently why their original answer received the score it did, or help them understand the correct concept based on the rubric. 
+    Keep your explanation concise, friendly, and under 150 words.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Clarification error: {e}")
+        return "I'm having trouble analyzing this question right now. Please try again in a moment."
