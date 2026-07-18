@@ -1,24 +1,21 @@
 import fitz
 import json
 import os
-import ast
-from PyPDF2 import PdfReader
+
 import pandas as p
 import textwrap
 from dotenv import load_dotenv
 from google.genai import types
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import seaborn as sns
-import matplotlib.pyplot as plt
+
+
 import umap
 from sklearn.cluster import KMeans
-import re
-from mistralai.client import Mistral
-from openai import OpenAI
+
 from PIL import Image
 import fitz  # PyMuPDF
-import base64
+
 import google.generativeai as genai
 import json
 import os
@@ -552,27 +549,3 @@ def grade_exam_batch(original_exam, user_answers):
         return [{"index": i, "score": 0, "feedback": "Error processing grading for this item."} for i in range(len(original_exam))]
     
 def clarify_exam_item(question, user_answer, correct_answer, feedback, user_query):
-    """
-    Provides targeted tutoring to explain why a student lost points on a specific exam question.
-    """
-    prompt = f"""
-    You are an encouraging and insightful university tutor helping a student review their exam results.
-    
-    Context of the exam item:
-    - Question Asked: "{question}"
-    - Student's Answer: "{user_answer}"
-    - Expected Answer / Rubric: "{correct_answer}"
-    - Examiner's Initial Feedback: "{feedback}"
-    
-    Student's Follow-up Question/Doubt: "{user_query}"
-    
-    Task: Answer the student's follow-up question directly. Explain clearly and gently why their original answer received the score it did, or help them understand the correct concept based on the rubric. 
-    Keep your explanation concise, friendly, and under 150 words.
-    """
-    
-    try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"Clarification error: {e}")
-        return "I'm having trouble analyzing this question right now. Please try again in a moment."
