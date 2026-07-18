@@ -2,7 +2,6 @@ from flask import json, json, render_template, request, jsonify, send_file
 from flask_login import login_user, logout_user, current_user
 from models import Course, Users
 from werkzeug.security import generate_password_hash, check_password_hash
-from gmailtest import get_mail
 import AI_API, os, pandas
 import jwt
 import datetime
