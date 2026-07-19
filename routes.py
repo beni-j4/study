@@ -84,11 +84,8 @@ def register_routes(app, db):
         return jsonify({"success": True, "message": f"Processed {course}"}), 200
 
     @app.route('/')
-    @token_required
     def user(user_id):
-        if current_user.is_authenticated:
-            return str(current_user.username)
-        return 'no user is logged in'
+       pass
 
     @app.route('/login', methods=['POST'])
     def login():
