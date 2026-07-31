@@ -36,7 +36,7 @@ def token_required(f):
 def register_routes(app, db):
     @app.route('/people', methods=['GET', 'POST'])
     def index():
-        pass
+        return 'peeps'
 
     @app.route('/upload', methods=['POST'])
     @token_required
@@ -45,7 +45,13 @@ def register_routes(app, db):
             return jsonify({"success": False, "message": "No file field found"}), 400
 
         course = request.form.get('course')
+        is_mathematical = request.form.get('is_mathematical')
         files = request.files.getlist('files')
+        print(is_mathematical)
+        if is_mathematical == 'true':
+            is_mathematical = True
+        else:
+            is_mathematical = False
 
         if not course:
             return jsonify({"success": False, "message": "Course name is required"}), 400
@@ -77,7 +83,7 @@ def register_routes(app, db):
 
         existing_course = Course.query.filter_by(name=course, user_id=user_id).first()
         if not existing_course:
-            new_course = Course(name=course, user_id=user_id)
+            new_course = Course(name=course, user_id=user_id, is_mathematical=is_mathematical)
             db.session.add(new_course)
             db.session.commit()
 
@@ -85,7 +91,7 @@ def register_routes(app, db):
 
     @app.route('/')
     def user(user_id):
-       pass
+       return "here"
 
     @app.route('/login', methods=['POST'])
     def login():
@@ -93,7 +99,7 @@ def register_routes(app, db):
         user = Users.query.filter(Users.username == data.get('username')).first()
 
         if not user:
-            return "no user"
+            return jsonify({"status": "error", "message": "User not found"}), 404
         if user and check_password_hash(user.password, data.get('password')):
             token = jwt.encode({
                 'user_id': user.id,
@@ -110,7 +116,7 @@ def register_routes(app, db):
     @token_required     
     def logout(uid):
         logout_user()
-        return "success"
+        return jsonify({"status": "success", "message": "Logged out successfully"}), 200
 
     @app.route('/signup', methods=['POST', 'GET'])
     def signup():
@@ -119,17 +125,30 @@ def register_routes(app, db):
         if request.method == 'POST':
             data = request.get_json(force=True)
             if data and data.get('username') and data.get('password'):
-                name = data.get('username')
+                name = data.get('name')
                 past = data.get('password')
                 email = data.get('email')
+                level_of_study = data.get('level_of_study')
+                current_class = data.get('current_class')
                 password = generate_password_hash(past)
-                user = Users(username=name, password=password, email=email)
+                user = Users(username=data.get('username'), password=password, email=email, full_name=name, level_of_study=level_of_study, current_class=current_class)
                 db.session.add(user)
                 db.session.commit()
                 login_user(user)
-                return 'success'
-            return "enter username and password"
-
+                token = jwt.encode({
+                'user_id': user.id,
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            }, SECRET_KEY, algorithm="HS256")
+                return jsonify({
+                                "status": "success",
+                                "token": token,
+                                "courses": [c.name for c in user.courses]
+                            })
+            return jsonify({
+                                "status": "failed",
+                                "message": "enter your username",
+                                
+                            })
     @app.route('/get_question', methods=['POST'])
     @token_required
     def get_question(user_id):
@@ -163,30 +182,6 @@ def register_routes(app, db):
             return jsonify(som['topic'])
         else:
             return jsonify(som['topic'].tolist())
-
-    @app.route('/study', methods=['POST'])
-    @token_required
-    def study(user_id):
-        data = request.get_json(force=True)
-        course = data.get('course')
-        topic_value = data.get('topic')
-
-        file_path = os.path.join(UPLOAD_DIR, f"{course}topics.csv")
-        victoria = pandas.read_csv(file_path)
-        result = victoria[victoria['topic'] == topic_value]
-
-        file = os.path.join(UPLOAD_DIR, f"{course}topic.csv")
-        vick = pandas.read_csv(file)
-        merged = vick.merge(result, on='module_id')
-        chunks = merged['content'].tolist()
-        v = AI_API.study(topic_value, chunks)
-        print(v)
-        
-        # Safely parse the generated JSON payload to avoid double serialization issues on client endpoints
-        try:
-            return jsonify(json.loads(v))
-        except Exception:
-            return jsonify({"raw_output": v})
 
     @app.route('/ask_ai', methods=['POST'])
     @token_required
@@ -227,51 +222,7 @@ def register_routes(app, db):
         except Exception as e:
             return jsonify({"status": "error", "message": f"An unexpected error occurred: {str(e)}"}), 500
         
-    @app.route('/upload_past_questions', methods=['POST'])
-    @token_required
-    def upload_past_questions(user_id):
-        course_name = request.form.get('course')
-        
-        if 'file' not in request.files:
-            return jsonify({"status": "error", "message": "No file part"}), 400
-            
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"status": "error", "message": "No selected file"}), 400
-
-        if file and course_name:
-            try:
-                data_list = AI_API.process_pdf_and_save_images(file, course_name)
-                past_questions_text = ""
-                
-                for item in data_list:
-                    if item['type'] == 'text':
-                        past_questions_text += item['content'] + "\n"
-                    elif item['type'] == 'image':
-                        ocr_text = AI_API.extract_text_from_image(item['content'])
-                        if ocr_text:
-                            past_questions_text += f"\n[Extracted from image/diagram]: {ocr_text}\n"
-                
-                if not past_questions_text.strip():
-                    return jsonify({"status": "error", "message": "No readable text or images found in the document."}), 400
-                
-                relevance_map = AI_API.update_relevance_map(
-                    course_name=course_name, 
-                    past_questions_text=past_questions_text, 
-                    upload_dir=AI_API.UPLOAD_DIR
-                )
-                
-                return jsonify({
-                    "status": "success", 
-                    "message": "Past questions analyzed and relevance map updated!",
-                    "relevance": relevance_map
-                })
-                
-            except FileNotFoundError as e:
-                return jsonify({"status": "error", "message": str(e)}), 404
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
-
+   
     @app.route('/submit_exam', methods=['POST'])
     @token_required
     def submit_exam(user_id):
@@ -312,18 +263,6 @@ def register_routes(app, db):
             "items": graded_items
         })
 
-    @app.route('/get_relevance/<course_name>', methods=['GET'])
-    @token_required
-    def get_relevance(user_id, course_name):
-        relevance_file = os.path.join(AI_API.UPLOAD_DIR, f"{course_name}_relevance.json")
-        
-        if not os.path.exists(relevance_file):
-            return jsonify({"status": "error", "message": "No relevance map found."}), 404
-            
-        with open(relevance_file, 'r') as f:
-            data = json.load(f)
-            
-        return jsonify({"status": "success", "relevance": data})
 
     @app.route('/clarify_item', methods=['POST'])
     @token_required
@@ -348,3 +287,287 @@ def register_routes(app, db):
         )
         
         return jsonify({"status": "success", "answer": explanation}), 200
+
+
+    @app.route('/get_relevance', methods=['GET'])
+    @token_required
+    def get_relevance(user_id):
+        course_name = request.args.get('course')
+        if not course_name:
+            return jsonify({"error": "Course name is required."}), 400
+
+        relevance_file = os.path.join(UPLOAD_DIR, f"{course_name}_relevance.json")
+        
+        if not os.path.exists(relevance_file):
+            return jsonify({}), 200
+            
+        try:
+            with open(relevance_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Extract topic_relevance if nested, otherwise return data directly
+            if isinstance(data, dict) and "topic_relevance" in data:
+                return jsonify(data["topic_relevance"]), 200
+                
+            return jsonify(data), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/upload_past_questions', methods=['POST'])
+    @token_required
+    def upload_past_questions(user_id):
+        course_name = request.form.get('course')
+        
+        if 'file' not in request.files:
+            return jsonify({"status": "error", "message": "No file part"}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"status": "error", "message": "No selected file"}), 400
+
+        if file and course_name:
+            try:
+                data_list = AI_API.process_pdf_and_save_images(file, course_name)
+                past_questions_text = ""
+                
+                for item in data_list:
+                    if item['type'] == 'text':
+                        past_questions_text += item['content'] + "\n"
+                    elif item['type'] == 'image':
+                        ocr_text = AI_API.extract_text_from_image(item['content'])
+                        if ocr_text:
+                            past_questions_text += f"\n[Extracted from image/diagram]: {ocr_text}\n"
+                
+                if not past_questions_text.strip():
+                    return jsonify({"status": "error", "message": "No readable text or images found in the document."}), 400
+                
+                relevance_map = AI_API.update_relevance_map(
+                    course_name=course_name, 
+                    past_questions_text=past_questions_text, 
+                    upload_dir=UPLOAD_DIR
+                )
+                
+                # Extract topic_relevance if nested
+                if isinstance(relevance_map, dict) and "topic_relevance" in relevance_map:
+                    return jsonify(relevance_map["topic_relevance"]), 200
+                    
+                return jsonify(relevance_map), 200
+                
+            except FileNotFoundError as e:
+                return jsonify({"status": "error", "message": str(e)}), 404
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
+    @app.route('/study', methods=['POST'])
+    @token_required
+    def study(user_id):
+        data = request.get_json(force=True)
+        course = data.get('course') 
+        topic_value = data.get('topic')
+        Courses = Course.query.filter(Course.name == course, Course.user_id == user_id).first()
+        is_mathematical = Courses.is_mathematical if course else False
+        print(is_mathematical)
+
+        file_path = os.path.join(UPLOAD_DIR, f"{course}topics.csv")
+        victoria = pandas.read_csv(file_path)
+        result = victoria[victoria['topic'] == topic_value]
+
+        file = os.path.join(UPLOAD_DIR, f"{course}topic.csv")
+        vick = pandas.read_csv(file)
+        merged = vick.merge(result, on='module_id')
+        chunks = merged['content'].tolist()
+        
+        if is_mathematical:
+            v = AI_API.study(topic_value, chunks)
+        else:
+            v = AI_API.study2(topic_value, chunks)
+        print("v is", v)
+        print("is_mathematical is", is_mathematical)
+        try:
+            return jsonify(v)
+        except Exception:
+            return jsonify({"raw_output": v})
+
+    @app.route('/delete_course', methods=['POST', 'DELETE'])
+    @token_required
+    def delete_course(user_id):
+        data = request.get_json(force=True)
+        course_name = data.get('course')
+        
+        if not course_name:
+            return jsonify({"status": "error", "message": "Course name is required"}), 400
+            
+        # 1. Delete course from the database
+        course = Course.query.filter_by(name=course_name, user_id=user_id).first()
+        if course:
+            db.session.delete(course)
+            db.session.commit()
+            
+        # 2. Delete generated files in UPLOAD_DIR (.pkl, .csv, and _relevance.json)
+        files_to_delete = [
+            f"{course_name}.pkl",
+            f"{course_name}topics.csv",
+            f"{course_name}topic.csv",
+            f"{course_name}_relevance.json"
+        ]
+        for filename in files_to_delete:
+            file_path = os.path.join(UPLOAD_DIR, filename)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    print(f"Error removing {file_path}: {e}")
+                    
+        # 3. Delete course images in IMAGE_STORAGE_DIR
+        if os.path.exists(IMAGE_STORAGE_DIR):
+            for img_file in os.listdir(IMAGE_STORAGE_DIR):
+                if img_file.startswith(f"{course_name}_"):
+                    img_path = os.path.join(IMAGE_STORAGE_DIR, img_file)
+                    try:
+                        os.remove(img_path)
+                    except Exception as e:
+                        print(f"Error removing image {img_path}: {e}")
+                        
+        # 4. Clear active exam session if one exists for this user
+        EXAM_SESSIONS.pop(user_id, None)
+        
+        return jsonify({
+            "status": "success", 
+            "message": f"Course '{course_name}' and all associated files deleted successfully."
+        }), 200
+
+    @app.route('/add_material', methods=['POST'])
+    @token_required
+    def add_material(user_id):
+        if 'files' not in request.files:
+            return jsonify({"success": False, "message": "No file field found"}), 400
+
+        course = request.form.get('course')
+        files = request.files.getlist('files')
+
+        if not course:
+            return jsonify({"success": False, "message": "Course name is required"}), 400
+
+        # Verify the course actually exists for this user
+        existing_course = Course.query.filter_by(name=course, user_id=user_id).first()
+        if not existing_course:
+            return jsonify({"success": False, "message": "Course not found. Use /upload to create a new course."}), 404
+
+        all_data = []
+
+        # 1. Process new files
+        for file in files:
+            if file.filename == '':
+                continue
+
+            if file.filename.lower().endswith('.pdf'):
+                all_data.extend(AI_API.process_pdf_and_save_images(file, course))
+            elif file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(AI_API.IMAGE_STORAGE_DIR, f"{course}_{file.filename}")
+                file.save(img_path)
+                all_data.append({'type': 'image', 'content': img_path})
+                extracted_text = AI_API.extract_text_from_image(img_path)
+                if extracted_text:
+                    chunks = AI_API.split_text(extracted_text)
+                    for chunk in chunks:
+                        all_data.append({'type': 'text', 'content': f"[Extracted from image '{file.filename}']: {chunk}"})
+
+        if not all_data:
+            return jsonify({"success": False, "message": "No valid files processed"}), 400
+
+        # 2. Get vectors for the NEW material
+        new_victoria = AI_API.get_vectors(all_data)
+        file_path = os.path.join(UPLOAD_DIR, f"{course}.pkl")
+
+        # 3. Merge with EXISTING vectors if the .pkl file exists
+        if os.path.exists(file_path):
+            try:
+                existing_victoria = pandas.read_pickle(file_path)
+                # Combine old dataframe and new dataframe
+                combined_victoria = pandas.concat([existing_victoria, new_victoria], ignore_index=True)
+                combined_victoria.to_pickle(file_path)
+            except Exception as e:
+                return jsonify({"success": False, "message": f"Failed to merge data: {str(e)}"}), 500
+        else:
+            # Fallback just in case the file was missing
+            new_victoria.to_pickle(file_path)
+
+        # 4. CRITICAL: Delete cached topic CSVs so the AI regenerates topics with the new material included
+        topics_csv = os.path.join(UPLOAD_DIR, f"{course}topics.csv")
+        topic_csv = os.path.join(UPLOAD_DIR, f"{course}topic.csv")
+        
+        for csv_path in [topics_csv, topic_csv]:
+            if os.path.exists(csv_path):
+                try:
+                    os.remove(csv_path)
+                except Exception as e:
+                    print(f"Note: Could not remove old cache {csv_path}: {e}")
+
+        return jsonify({
+            "success": True, 
+            "message": f"Successfully added new material to '{course}'. Topics will be updated on next load."
+        }), 200
+
+  
+
+    @app.route('/define_document_text', methods=['POST'])
+    @token_required 
+    def define_document_text(user_id):
+        data = request.get_json(force=True)
+        highlighted_text = data.get('text')
+        
+        if not highlighted_text:
+            return jsonify({
+                "status": "error", 
+                "explanation": "No text was selected."
+            }), 400
+            
+        try:
+            # Calls the dedicated AI function for defining text
+            answer = AI_API.get_semantic_definition(highlighted_text)
+            
+            return jsonify({
+                "status": "success", 
+                "explanation": answer
+            }), 200
+            
+        except Exception as e:
+            return jsonify({
+                "status": "error", 
+                "explanation": f"Failed to get definition: {str(e)}"
+            }), 500
+
+
+    @app.route('/ask_document_question', methods=['POST'])
+    @token_required
+    def ask_document_question(user_id):
+        data = request.get_json(force=True)
+        
+        highlighted_text = data.get('text')
+        pdf_name = data.get('pdf_name', 'Unknown Document')
+        question = data.get('question') 
+        
+        # Ensure both the context text and the user's question are provided
+        if not highlighted_text or not question:
+            return jsonify({
+                "status": "error", 
+                "explanation": "Both selected text and a question are required."
+            }), 400
+            
+        try:
+            # Calls the dedicated AI function for answering specific questions
+            answer = AI_API.answer_document_question(
+                highlighted_text=highlighted_text, 
+                question=question, 
+                pdf_name=pdf_name
+            )
+            
+            return jsonify({
+                "status": "success", 
+                "explanation": answer
+            }), 200
+            
+        except Exception as e:
+            return jsonify({
+                "status": "error", 
+                "explanation": f"Failed to process document query: {str(e)}"
+            }), 500
