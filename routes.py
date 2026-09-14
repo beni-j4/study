@@ -545,12 +545,13 @@ def register_routes(app, db):
         highlighted_text = data.get('text')
         pdf_name = data.get('pdf_name', 'Unknown Document')
         question = data.get('question') 
+        history = data.get('history', [])
         
         # Ensure both the context text and the user's question are provided
         if not highlighted_text or not question:
             return jsonify({
                 "status": "error", 
-                "explanation": "Both selected text and a question are required."
+                "answer": "Both selected text and a question are required."
             }), 400
             
         try:
@@ -558,16 +559,18 @@ def register_routes(app, db):
             answer = AI_API.answer_document_question(
                 highlighted_text=highlighted_text, 
                 question=question, 
-                pdf_name=pdf_name
+                pdf_name=pdf_name,
+                history=history
             )
             
+            # The frontend expects 'answer' for the chat UI
             return jsonify({
                 "status": "success", 
-                "explanation": answer
+                "answer": answer
             }), 200
             
         except Exception as e:
             return jsonify({
                 "status": "error", 
-                "explanation": f"Failed to process document query: {str(e)}"
+                "answer": f"Failed to process document query: {str(e)}"
             }), 500
