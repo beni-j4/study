@@ -90,7 +90,7 @@ def register_routes(app, db):
         return jsonify({"success": True, "message": f"Processed {course}"}), 200
 
     @app.route('/')
-    def user():
+    def user(user_id):
        return "here"
 
     @app.route('/login', methods=['POST'])
