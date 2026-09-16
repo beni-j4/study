@@ -32,205 +32,6 @@ if not api_key:
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-3.1-flash-lite')
 
-# ============================================================================
-# Multi-provider fallback layer: Google Gemini -> Groq -> Hugging Face
-#
-# Every text-generation call in this file goes through generate_text()
-# (or generate_from_image() / generate_multimodal() for calls that include
-# images) instead of calling `model.generate_content()` directly. Gemini is
-# tried first; if it raises for any reason (quota exhausted, network error,
-# bad key, etc.) it falls through to Groq's free tier, and if that also
-# fails, to Hugging Face's free Inference Providers tier. The error from
-# every failed provider is collected so the final exception is useful.
-#
-# Embeddings (embed_fn / find_best_passage) are NOT part of this fallback
-# chain and deliberately stay Gemini-only: a Groq or Hugging Face embedding
-# lives in a different vector space than Gemini's, so silently switching
-# providers there would corrupt cosine-similarity search against
-# already-embedded documents rather than gracefully degrade.
-# ============================================================================
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-HF_API_KEY = os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACE_API_KEY")
-
-# Overridable via env var in case a specific free-tier model gets
-# deprecated/rotated without needing a code change.
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-HF_MODEL = os.getenv("HF_MODEL", "openai/gpt-oss-120b")
-# Vision-capable HF model for the image fallback path (see generate_from_image).
-# Free-tier vision model availability shifts more often than text models --
-# verify this is still live on your Hugging Face account if OCR fallback
-# stops working, and swap via the HF_VISION_MODEL env var if so.
-HF_VISION_MODEL = os.getenv("HF_VISION_MODEL", "meta-llama/Llama-3.2-11B-Vision-Instruct")
-
-# Both of these are optional: if the package isn't installed or the API key
-# isn't set, that tier is simply skipped rather than crashing the app --
-# Gemini-only operation still works exactly as before.
-try:
-    from groq import Groq
-    _groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-except ImportError:
-    _groq_client = None
-
-try:
-    from huggingface_hub import InferenceClient
-    _hf_client = InferenceClient(api_key=HF_API_KEY) if HF_API_KEY else None
-except ImportError:
-    _hf_client = None
-
-
-def _extract_message_text(msg):
-    """Pulls plain text out of either shape of history entry used in this
-    codebase: the frontend's {"role", "content"} or Gemini-native
-    {"role", "parts": [{"text": ...}]}."""
-    if msg.get('content'):
-        return msg['content']
-    parts = msg.get('parts')
-    if parts:
-        return " ".join(p.get('text', '') for p in parts if isinstance(p, dict))
-    return ""
-
-
-def _extract_message_role(msg, assistant_label):
-    raw_role = msg.get('role', 'user')
-    return assistant_label if raw_role in ('model', 'assistant', 'ai') else 'user'
-
-
-def _call_gemini_text(prompt, system_instruction=None, history=None):
-    if system_instruction or history:
-        client = google_genai.Client(api_key=api_key)
-        config = types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None
-        contents = [
-            {"role": _extract_message_role(m, 'model'), "parts": [{"text": _extract_message_text(m)}]}
-            for m in (history or [])
-        ]
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            config=config,
-            contents=contents,
-        )
-        return response.text
-    response = model.generate_content(prompt)
-    return response.text
-
-
-def _call_groq_text(prompt, system_instruction=None, history=None):
-    if _groq_client is None:
-        raise RuntimeError("Groq is not configured (missing GROQ_API_KEY or the groq package).")
-    messages = []
-    if system_instruction:
-        messages.append({"role": "system", "content": system_instruction})
-    for m in (history or []):
-        messages.append({"role": _extract_message_role(m, 'assistant'), "content": _extract_message_text(m)})
-    messages.append({"role": "user", "content": prompt})
-
-    completion = _groq_client.chat.completions.create(model=GROQ_MODEL, messages=messages)
-    return completion.choices[0].message.content
-
-
-def _call_hf_text(prompt, system_instruction=None, history=None):
-    if _hf_client is None:
-        raise RuntimeError("Hugging Face is not configured (missing HF_API_KEY or the huggingface_hub package).")
-    messages = []
-    if system_instruction:
-        messages.append({"role": "system", "content": system_instruction})
-    for m in (history or []):
-        messages.append({"role": _extract_message_role(m, 'assistant'), "content": _extract_message_text(m)})
-    messages.append({"role": "user", "content": prompt})
-
-    completion = _hf_client.chat.completions.create(model=HF_MODEL, messages=messages)
-    return completion.choices[0].message.content
-
-
-def generate_text(prompt, system_instruction=None, history=None):
-    """
-    Runs a text prompt through Google Gemini first; on failure, tries
-    Groq's free tier; on failure, tries Hugging Face's free tier. Raises
-    a combined error only if all three fail.
-    """
-    errors = []
-    for provider_name, call in (
-        ("Google Gemini", _call_gemini_text),
-        ("Groq", _call_groq_text),
-        ("Hugging Face", _call_hf_text),
-    ):
-        try:
-            return call(prompt, system_instruction=system_instruction, history=history)
-        except Exception as e:
-            print(f"[AI fallback] {provider_name} failed: {e}")
-            errors.append(f"{provider_name}: {e}")
-    raise RuntimeError(f"All AI providers failed. Details: {' | '.join(errors)}")
-
-
-def generate_from_image(image, prompt):
-    """
-    Same Gemini -> Groq -> Hugging Face intent as generate_text(), but for
-    a single image + prompt (used for OCR). Groq's free tier currently has
-    no vision-capable models, so it's skipped here entirely and this falls
-    straight from Gemini to Hugging Face's vision models on failure.
-    """
-    errors = []
-    try:
-        response = model.generate_content([image, prompt])
-        return response.text
-    except Exception as e:
-        print(f"[AI fallback] Google Gemini (vision) failed: {e}")
-        errors.append(f"Google Gemini: {e}")
-
-    if _hf_client is not None:
-        try:
-            import base64
-            from io import BytesIO
-            buffer = BytesIO()
-            image.save(buffer, format="PNG")
-            b64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            completion = _hf_client.chat.completions.create(
-                model=HF_VISION_MODEL,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}},
-                    ],
-                }],
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            print(f"[AI fallback] Hugging Face (vision) failed: {e}")
-            errors.append(f"Hugging Face: {e}")
-    else:
-        errors.append("Hugging Face: not configured (missing HF_API_KEY or the huggingface_hub package).")
-
-    raise RuntimeError(f"All AI providers failed for image input. Details: {' | '.join(errors)}")
-
-
-def generate_multimodal(contents):
-    """
-    contents: a list mixing PIL Image objects and text strings, as used by
-    reduce() below. Tries Gemini's native multimodal call first (handles
-    the mixed list directly). On failure, falls back to Groq then Hugging
-    Face using ONLY the text portions of `contents` -- Groq has no free
-    vision models, and reliably combining several images into one chat
-    message isn't consistent across Hugging Face's provider router, so any
-    image content is skipped on this particular fallback path. If image
-    content is essential to the result you need, that's a real quality
-    trade-off worth knowing about rather than a silent one.
-    """
-    try:
-        response = model.generate_content(contents)
-        return response.text
-    except Exception as e:
-        print(f"[AI fallback] Google Gemini (multimodal) failed: {e}")
-
-    text_only = "\n".join(item for item in contents if isinstance(item, str))
-    try:
-        return _call_groq_text(text_only)
-    except Exception as e:
-        print(f"[AI fallback] Groq failed: {e}")
-
-    return _call_hf_text(text_only)
-
 UPLOAD_DIR = 'user_data_cache'
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 IMAGE_STORAGE_DIR = 'IMAGE_STORAGE_DIR'
@@ -268,8 +69,8 @@ def reduce(merged_data):
     prompt = "Task: Analyze these documents and images to identify the core topic. Respond with only the topic name (max 10 words)."
     contents.append(prompt)
 
-    response_text = generate_multimodal(contents)
-    return response_text
+    response = model.generate_content(contents)
+    return response.text
 
 def create_conv(chunk):
     client = google_genai.Client(api_key=api_key)
@@ -523,10 +324,10 @@ def study(topic, chunks):
     }}
     """
 
-    response_text = generate_text(prompt)
+    response = model.generate_content(prompt)
     
     try:
-        return extract_json(response_text)
+        return extract_json(response.text)
     except Exception as e:
         print(f"Failed to parse study guide JSON: {e}")
         return {
@@ -606,27 +407,30 @@ def study2(topic, chunks):
             ]
         }}
         """
-    response_text = generate_text(prompt)
-    return extract_json(response_text)
+    response = model.generate_content(prompt)
+    return extract_json(response.text)
 
 def ask(question, chunks, history=None):
+    client = google_genai.Client(api_key=api_key)
     prompt = f"Answer this question: {question} based on: {chunks}. Keep your answer short and concise (100 to 200 words)."
-    # NOTE: the original implementation accepted `history` but never
-    # actually passed it to the model -- follow-up questions had no
-    # conversational context. Fixed here as part of the provider refactor.
-    return generate_text(prompt, history=history)
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    return response.text
 
 def extract_text_from_image(image_path):
-    """Extracts text from a saved image file via the AI fallback chain."""
+    """Uses Gemini to extract text from a saved image file."""
     try:
         img = Image.open(image_path)
         prompt = "Extract all readable text from this image exactly as written. Do not summarize. If there is no text, return exactly 'NO_TEXT_FOUND'."
-        response_text = generate_from_image(img, prompt)
+        response = model.generate_content([img, prompt])
         
-        if not response_text or "NO_TEXT_FOUND" in response_text:
+        if not response.text or "NO_TEXT_FOUND" in response.text:
             return None
             
-        return response_text
+        return response.text
     except Exception as e:
         print(f"OCR Error on {image_path}: {e}")
         return None
@@ -696,10 +500,10 @@ def update_relevance_map(course_name, past_questions_text, upload_dir=UPLOAD_DIR
     }}
     """
     
-    response_text = generate_text(prompt)
+    response = model.generate_content(prompt)
     
     try:
-        relevance_data = extract_json(response_text)
+        relevance_data = extract_json(response.text)
         relevance_file = os.path.join(upload_dir, f"{course_name}_relevance.json")
         with open(relevance_file, 'w', encoding='utf-8') as f:
             json.dump(relevance_data, f, indent=4)
@@ -750,10 +554,10 @@ def generate_adaptive_exam(course_name, upload_dir=UPLOAD_DIR):
     }}
     """
     
-    response_text = generate_text(prompt)
+    response = model.generate_content(prompt)
     
     try:
-        questions = extract_json(response_text)
+        questions = extract_json(response.text)
         
         for q in questions:
             if 'id' not in q or len(str(q['id'])) < 5:
@@ -775,9 +579,9 @@ def grade_essay(question, student_response, rubric):
     Return ONLY JSON: {{"score": 8, "feedback": "Your explanation was correct but missed..."}}
     """
     
+    response = model.generate_content(prompt)
     try:
-        response_text = generate_text(prompt)
-        return extract_json(response_text)
+        return extract_json(response.text)
     except:
         return {"score": 0, "feedback": "Error processing answer."}
 
@@ -812,8 +616,8 @@ def grade_exam_batch(original_exam, user_answers):
     """
     
     try:
-        response_text = generate_text(prompt)
-        return extract_json(response_text)
+        response = model.generate_content(prompt)
+        return extract_json(response.text)
     except Exception as e:
         print(f"Batch grading failed: {e}")
         return [{"index": i, "score": 0, "feedback": "Error processing grading for this item."} for i in range(len(original_exam))]
@@ -836,8 +640,8 @@ def clarify_exam_item(question, user_answer, correct_answer, feedback, user_quer
     """
     
     try:
-        response_text = generate_text(prompt)
-        return response_text.strip()
+        response = model.generate_content(prompt)
+        return response.text.strip()
     except Exception as e:
         print(f"Clarification error: {e}")
         return "I'm having trouble analyzing this question right now. Please try again in a moment."
@@ -861,8 +665,8 @@ def get_semantic_definition(highlighted_text):
     # response = ai_client.generate(prompt)
     # return response.text
     
-    response_text = generate_text(prompt)
-    return response_text.strip()
+    response = model.generate_content(prompt) 
+    return response.text.strip()
 
 
 def answer_document_question(highlighted_text, question, pdf_name, history):
@@ -870,6 +674,8 @@ def answer_document_question(highlighted_text, question, pdf_name, history):
     Answers a specific user query based ONLY on the provided highlighted text,
     maintaining conversational context from the history.
     """
+    client = google_genai.Client(api_key=api_key)
+    
     # 1. Define the system instruction to anchor the AI's persona and context
     system_instruction = (
         f"You are an expert, friendly AI Study Assistant embedded inside a PDF reading application.\n"
@@ -880,11 +686,19 @@ def answer_document_question(highlighted_text, question, pdf_name, history):
         f"2. Pay close attention to the provided chat history to understand follow-up questions.\n"
         f"3. Keep explanations clear, encouraging, and educational."
     )
-
-    # 2. Generate the response. NOTE: the original implementation built this
-    # system_instruction but never actually passed it into the model call --
-    # every answer was generated with no persona/document context at all.
-    # Fixed here as part of the provider refactor: it's now threaded through
-    # generate_text(), which honors it on every provider tier.
-    response_text = generate_text(question, system_instruction=system_instruction, history=history)
-    return response_text.strip()
+    
+    # 2. Build the contents array for the Gemini API
+    formatted_contents = []
+    
+    if history:
+        for msg in history:
+            # Map frontend roles ('user' or 'ai') to Gemini roles ('user' or 'model')
+            role = "user" if msg.get('role') == "user" else "model"
+            formatted_contents.append({"role": role, "parts": [{"text": msg.get('content', '')}]})
+            
+    # 3. Append the current user question
+    formatted_contents.append({"role": "user", "parts": [{"text": question}]})
+    
+    # 4. Generate the response
+    response = model.generate_content(formatted_contents)
+    return response.text.strip()
